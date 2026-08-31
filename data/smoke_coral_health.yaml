@@ -1,0 +1,5 @@
+path: 'C:/Users/Delta Tech/MAFFN_YOLOv5-based-Coral-reefs-health-detection-and-coral-reefs-dataset/MAFFN_YOLOv5-based-Coral-reefs-health-detection-and-coral-reefs-dataset-main/Dataset with annotation in YOLO format'
+train: train/images
+val: valid/images
+nc: 5
+names: ['Band disease', 'Bleached disease', 'Dead Coral', 'Healthy Coral', 'White Pox Disease']
