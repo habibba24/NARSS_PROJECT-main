@@ -1,13 +1,15 @@
 """End-to-end demo: raw photo in -> visualized damage findings out.
 
-Two things this proves, matching the plan's verification section:
-1. `demo()` - the full CoralDamagePipeline (colony -> algae/bleaching/
-   disease) run on an arbitrary raw image, with results drawn and saved.
+1. `demo()` - runs a CoralDamagePipeline on an arbitrary raw image, draws
+   the algae/bleaching overlays, and saves the result.
+   --domain reef (default): one Coralscapes segmentation pass -> coral /
+     bleached-coral / algae coverage. For wide underwater reef photos.
+   --domain aquarium: colony detector -> per-colony bleaching + algae.
+     For tank/close-up coral shots.
 2. `prove_embedded_preprocessing()` - loads ONE exported .onnx file via
-   onnxruntime ONLY (no manual color-correction call anywhere in this
-   function) and runs it on a raw letterboxed image. If this produces
-   sane output, the color-cast correction is genuinely inside the graph,
-   not bolted on externally in Python.
+   onnxruntime ONLY (no manual color-correction call) and runs it on a
+   raw letterboxed image, confirming color-cast correction is inside the
+   graph. Applies to the aquarium-path stages that are exported.
 """
 import argparse
 from pathlib import Path
@@ -22,7 +24,7 @@ DEMO_OUT_DIR = REPO_ROOT / "data" / "processed" / "demo_output"
 DAMAGE_COLORS = {"algae": (60, 200, 60), "bleaching": (240, 240, 240), "disease": (230, 40, 40)}
 
 
-def demo(image_path: str, domain: str = "aquarium"):
+def demo(image_path: str, domain: str = "reef"):
     from pipeline.coral_damage_model import CoralDamagePipeline
 
     pipeline = CoralDamagePipeline()
@@ -103,9 +105,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("image_path")
     parser.add_argument("--mode", choices=["pipeline", "onnx_proof"], default="pipeline")
-    parser.add_argument("--domain", choices=["aquarium", "reef"], default="aquarium",
-                        help="aquarium: colony detector + per-colony bleaching. "
-                             "reef: one Coralscapes segmentation pass for coral/bleached/algae.")
+    parser.add_argument("--domain", choices=["reef", "aquarium"], default="reef",
+                        help="reef (default): one Coralscapes segmentation pass for "
+                             "coral/bleached/algae, for wide underwater reef photos. "
+                             "aquarium: colony detector + per-colony bleaching, for tank close-ups.")
     parser.add_argument("--stage", default="colony_detector")
     args = parser.parse_args()
 

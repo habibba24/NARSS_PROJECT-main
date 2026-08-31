@@ -72,7 +72,7 @@ the repo root, so no code edits are needed if the folders match.
 | **coral_soft** — bbox JSON, healthy-coral genus photos | `coral_soft/` | `annotations/*.json` and `image/<Genus>/*.JPG` | `src/data/coral_soft_to_yolo.py`, `src/data/prep_bleaching_reference.py` |
 | **archive-2** — CoralNet-style point labels (folder may be named `archive (1)`, `archive-2`, or `archive-2-subset`; first match wins) | `archive (1)/` | `combined_annotations_remapped.csv` and `images/images/*.jpg` | `src/data/grow_algae_masks.py`, `src/data/build_algae_tiles.py` |
 | **Kaggle "Healthy and Bleached Corals Image Classification"** (923 imgs) | `data/external/kaggle_bleaching/` | `healthy_corals/*` and `bleached_corals/*` | `src/data/prep_bleaching_reference.py`, `src/eval/calibrate_bleaching_threshold.py` |
-| **Coralscapes** (Cityscapes-style) — active algae segmenter training | `data/external/coralscapes/` *or* set `CORALSCAPES_ROOT` env var | `leftImg8bit/{train,val}/…` and `gtFine/{train,val}/…` | `src/data/coralscapes_to_yolo_seg.py`, `src/data/coralscapes_to_yolo_det.py`, `src/models/algae_segmenter.py` |
+| **Coralscapes** (Cityscapes-style) — reef path model + eval masks | `data/external/coralscapes/` *or* set `CORALSCAPES_ROOT` env var (e.g. `D:/coralscapes/coralscapes`) | `leftImg8bit/{train,val}/…`, `gtFine/{train,val}/…`, `classes.json` | `src/data/coralscapes_to_yolo_seg.py`, `src/data/coralscapes_to_yolo_det.py`, `src/eval/evaluate_all.py` |
 | **MAFFN YOLOv5 coral-health disease set** — *out of scope, optional* | any path; edit `DATASET_ROOT` at the top of `src/data/build_oversampled_train_list.py` | `train/{images,labels}/…` in YOLO format | `src/data/build_oversampled_train_list.py` only |
 
 Everything under `data/processed/` is **generated** by the data-prep step
@@ -96,32 +96,55 @@ from scratch. The `data/*.yaml` files `coral_health_augmented.yaml` and
 `smoke_coral_health.yaml` still carry absolute paths and belong to the
 out-of-scope disease work — ignore them unless you're reviving that.
 
+## Two paths
+
+The damage checks run in one of two modes depending on the photo:
+
+- **reef** (`CoralDamagePipeline.run_reef`, the deployment target) — a single
+  semantic-segmentation pass with the pretrained **Coralscapes DINOv3**
+  model (`EPFL-ECEO/coralscapes-vit-b-dpt`) reads coral / bleached-coral /
+  algae straight off the frame. No colony detector, no colour module.
+  Needs `huggingface-cli login` once (the DINOv3 backbone is a gated Meta
+  repo). On Coralscapes val: algae IoU 0.56 (R 0.86), bleached-coral IoU
+  0.70 (R 0.92).
+- **aquarium** (`CoralDamagePipeline.run`) — the original stack: a YOLO
+  **colony detector** (trained on `coral_soft`, mAP@50 ~0.86) crops each
+  colony, then a deterministic colour-space **bleaching** calc (per-genus
+  reference, F1 ~0.54) and the DINOv3 model run per crop. For tank/close-up
+  coral shots; it finds nothing on wide reef scenes.
+
+Earlier attempts at the algae stage that did **not** work and are kept only
+for reference: weak flood-fill masks from CoralNet points → YOLO-seg (mask
+mAP50 ~0.01, `grow_algae_masks.py` + `algae_segmenter` history), real
+Coralscapes polygons → YOLO-seg (~0.03), a 224px tile classifier
+(`algae_classifier.py`, acc 0.82 — the lightweight non-ViT fallback), and a
+reef "coral" detector (`coralscapes_to_yolo_det.py`, mAP50 ~0.34).
+
 ## Pipeline, in order
 
 ```bash
+export PYTHONPATH=src
+export HF_TOKEN=hf_...          # or: huggingface-cli login  (reef path only)
+
 # 1. Data prep
-python3 src/data/coral_soft_to_yolo.py
-python3 src/data/grow_algae_masks.py
-python3 src/data/prep_bleaching_reference.py
-# the last one needs the Kaggle "Healthy and Bleached Corals Image
-# Classification" set placed (or symlinked) into data/external/kaggle_bleaching/
-# - it prints setup instructions and skips cleanly if that's missing.
+python src/data/coral_soft_to_yolo.py            # aquarium colony detector + bleaching ref
+python src/data/augment_lowres_coral_soft.py
+python src/data/prep_bleaching_reference.py      # needs data/external/kaggle_bleaching/ ; skips cleanly if absent
+python src/data/coralscapes_to_yolo_seg.py       # reef algae eval masks (needs Coralscapes)
 
-# 2. Train (nano-sized models; increase --epochs for real training runs,
-#    the numbers below are just enough to prove the mechanics work)
-PYTHONPATH=src python3 src/models/colony_detector.py --epochs 30 --device mps
-PYTHONPATH=src python3 src/models/algae_segmenter.py --epochs 30 --device mps
+# 2. Train the aquarium colony detector (reef path is pretrained, nothing to train)
+python src/models/colony_detector.py --epochs 150 --device 0
 
-# 3. Evaluate everything that's been trained so far
-PYTHONPATH=src python3 src/eval/evaluate_all.py
+# 3. Evaluate (reef segmenter + aquarium colony detector + aquarium bleaching)
+python src/eval/evaluate_all.py
 
-# 4. Export to ONNX (skips any stage that isn't trained yet)
-PYTHONPATH=src python3 src/export/export_onnx.py
+# 4. Export the aquarium stages to ONNX (the reef DINOv3 ViT is not exported yet)
+python src/export/export_onnx.py
 
 # 5. Demo end-to-end on a raw photo
-PYTHONPATH=src python3 src/inference/run_demo.py path/to/photo.jpg
-# proves preprocessing is embedded in the exported graph (onnxruntime only, no manual color-correction):
-PYTHONPATH=src python3 src/inference/run_demo.py path/to/photo.jpg --mode onnx_proof --stage colony_detector
+python src/inference/run_demo.py path/to/reef_photo.jpg               # --domain reef (default)
+python src/inference/run_demo.py path/to/tank_photo.jpg --domain aquarium
+python src/inference/run_demo.py path/to/photo.jpg --mode onnx_proof --stage colony_detector
 ```
 
 ## Scope note

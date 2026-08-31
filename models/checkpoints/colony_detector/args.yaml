@@ -2,7 +2,7 @@ task: detect
 mode: train
 model: yolo11n.pt
 data: D:\Downloads\NARSS_PROJECT-main\data\processed\coral_soft\data.yaml
-epochs: 40
+epochs: 150
 time: null
 patience: 10
 batch: 16

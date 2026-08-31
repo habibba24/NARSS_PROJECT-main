@@ -25,49 +25,54 @@ def eval_colony_detector():
     results_table.append(("colony_detector", "recall(mean)", metrics.box.mr, metrics.box.nc))
 
 
-def eval_algae_segmenter():
+def eval_reef_segmenter():
+    """Pixel metrics for the reef path (CoralDamagePipeline.run_reef): the
+    Coralscapes segmenter's algae and bleached-coral channels, scored against
+    the raw Coralscapes val masks."""
+    import os
+
     import numpy as np
     from PIL import Image
 
     from models import algae_segmenter
 
-    val_img = REPO_ROOT / "data" / "processed" / "algae_seg" / "images" / "val"
-    val_msk = REPO_ROOT / "data" / "processed" / "algae_seg" / "masks" / "val"
-    if not val_img.is_dir() or not any(val_img.iterdir()):
-        print("[algae_segmenter] skipped: no data/processed/algae_seg/val "
-              "(run src/data/coralscapes_to_yolo_seg.py)")
+    roots = [os.environ.get("CORALSCAPES_ROOT", ""), r"D:/coralscapes/coralscapes",
+             str(REPO_ROOT / "data" / "external" / "coralscapes")]
+    cs = next((p for p in roots if p and (Path(p) / "leftImg8bit" / "val").is_dir()), None)
+    if cs is None:
+        print("[reef_segmenter] skipped: Coralscapes val not found (set CORALSCAPES_ROOT)")
         return
     try:
         model = algae_segmenter.load_model()
     except Exception as e:  # gated repo / no hf login / offline
-        print(f"[algae_segmenter] skipped: {type(e).__name__}: {str(e)[:120]}")
+        print(f"[reef_segmenter] skipped: {type(e).__name__}: {str(e)[:120]}")
         return
 
-    # pixel IoU / precision / recall for the 'algae covered substrate' class,
-    # against the Coralscapes val masks (converted to binary by the prep script).
-    inter = union = tp = fp = fn = 0
-    n = 0
-    for ip in sorted(val_img.glob("*.jpg")):
-        mp = val_msk / f"{ip.stem}.png"
+    ALGAE = {algae_segmenter.ALGAE_CLASS_ID}
+    BLEACHED = set(algae_segmenter.CORAL_BLEACHED_IDS)
+    acc = {"algae": [0, 0, 0], "bleached": [0, 0, 0]}  # tp, fp, fn
+    imgs = sorted((Path(cs) / "leftImg8bit" / "val").rglob("*_leftImg8bit.png"))
+    for ip in imgs:
+        mp = Path(cs) / "gtFine" / "val" / ip.parent.name / ip.name.replace("_leftImg8bit.png", "_gtFine.png")
         if not mp.exists():
             continue
-        gt = np.array(Image.open(mp)) > 127
-        pred = algae_segmenter.segment_crop(model, np.array(Image.open(ip).convert("RGB")))["mask"]
-        inter += int(np.logical_and(pred, gt).sum())
-        union += int(np.logical_or(pred, gt).sum())
-        tp += int(np.logical_and(pred, gt).sum())
-        fp += int(np.logical_and(pred, ~gt).sum())
-        fn += int(np.logical_and(~pred, gt).sum())
-        n += 1
+        gt = np.array(Image.open(mp))
+        pred = algae_segmenter.segment_reef(model, np.array(Image.open(ip).convert("RGB")))["pred"]
+        for name, ids in (("algae", ALGAE), ("bleached", BLEACHED)):
+            p = np.isin(pred, list(ids))
+            g = np.isin(gt, list(ids))
+            acc[name][0] += int((p & g).sum())
+            acc[name][1] += int((p & ~g).sum())
+            acc[name][2] += int((~p & g).sum())
 
-    iou = inter / union if union else 0.0
-    precision = tp / (tp + fp) if (tp + fp) else 0.0
-    recall = tp / (tp + fn) if (tp + fn) else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-    results_table.append(("algae_segmenter", "pixel_IoU", iou, n))
-    results_table.append(("algae_segmenter", "pixel_precision", precision, n))
-    results_table.append(("algae_segmenter", "pixel_recall", recall, n))
-    results_table.append(("algae_segmenter", "pixel_F1", f1, n))
+    for name, (tp, fp, fn) in acc.items():
+        P = tp / (tp + fp) if tp + fp else 0.0
+        R = tp / (tp + fn) if tp + fn else 0.0
+        F = 2 * P * R / (P + R) if P + R else 0.0
+        IoU = tp / (tp + fp + fn) if tp + fp + fn else 0.0
+        results_table.append(("reef_segmenter", f"{name}_IoU", IoU, len(imgs)))
+        results_table.append(("reef_segmenter", f"{name}_precision", P, len(imgs)))
+        results_table.append(("reef_segmenter", f"{name}_recall", R, len(imgs)))
 
 
 def eval_bleaching_module():
@@ -115,9 +120,9 @@ def eval_bleaching_module():
 
 
 def main():
-    eval_colony_detector()
-    eval_algae_segmenter()
-    eval_bleaching_module()
+    eval_reef_segmenter()      # reef path (primary): run_reef
+    eval_colony_detector()     # aquarium path
+    eval_bleaching_module()    # aquarium path
 
     print("\n=== Summary ===")
     print(f"{'component':20s} {'metric':40s} {'value':>8s} {'N':>6s}")
